@@ -66,9 +66,7 @@ const sendResetOTP = async (req, res) => {
 
     await sendSMS(phone, `AkaziConnect: Your password reset code is ${code}. Valid for 10 minutes.`);
 
-    // In dev (no Twilio), return code in response
-    const isDev = !process.env.TWILIO_ACCOUNT_SID;
-    res.json({ message: 'OTP sent to your phone', ...(isDev && { code }) });
+    res.json({ message: 'OTP sent to your phone' });
   } catch (err) {
     res.status(500).json({ message: 'Failed to send OTP' });
   }
