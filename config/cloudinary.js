@@ -12,17 +12,15 @@ cloudinary.config({
 let storage;
 
 if (process.env.CLOUDINARY_CLOUD_NAME) {
-  // Production: use Cloudinary
   storage = new CloudinaryStorage({
     cloudinary,
-    params: {
+    params: (req, file) => ({
       folder: 'akaziconnect',
+      resource_type: /pdf|doc/i.test(path.extname(file.originalname)) ? 'raw' : 'image',
       allowed_formats: ['jpg', 'jpeg', 'png', 'pdf', 'doc', 'docx'],
-      resource_type: 'auto',
-    },
+    }),
   });
 } else {
-  // Local dev: use disk storage
   storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, 'uploads/'),
     filename: (req, file, cb) => cb(null, `${Date.now()}${path.extname(file.originalname)}`),
