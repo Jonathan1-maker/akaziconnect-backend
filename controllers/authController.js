@@ -87,8 +87,8 @@ const resetPassword = async (req, res) => {
     const user = await User.findOne({ phone });
     if (!user) return res.status(404).json({ message: 'User not found' });
 
-    user.password = newPassword;
-    await user.save();
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await User.findByIdAndUpdate(user._id, { password: hashed });
     otpStore.delete(phone);
 
     res.json({ message: 'Password reset successfully' });
@@ -104,14 +104,18 @@ const changePassword = async (req, res) => {
     if (newPassword.length < 6) return res.status(400).json({ message: 'New password must be at least 6 characters' });
 
     const user = await User.findById(req.user._id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (!user.password) return res.status(400).json({ message: 'Please reset your password first' });
+
     const match = await user.matchPassword(currentPassword);
     if (!match) return res.status(401).json({ message: 'Current password is incorrect' });
 
-    user.password = newPassword;
-    await user.save();
+    const hashed = await bcrypt.hash(newPassword, 10);
+    await User.findByIdAndUpdate(req.user._id, { password: hashed });
     res.json({ message: 'Password changed successfully' });
   } catch (err) {
-    res.status(500).json({ message: 'Failed to change password' });
+    console.error('changePassword error:', err.message);
+    res.status(500).json({ message: err.message || 'Failed to change password' });
   }
 };
 
