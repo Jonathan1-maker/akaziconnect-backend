@@ -1,16 +1,12 @@
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const User = require('../models/User');
-const { sendSMS } = require('../config/sms');
 
 const generateToken = (id) => jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: '30d' });
 
-// In-memory OTP store: phone -> { code, expiresAt }
-const otpStore = new Map();
-
 const register = async (req, res) => {
   try {
-    const { name, phone, password, role } = req.body;
+    const { name, phone, email, password, role } = req.body;
     if (!name || !phone || !password) return res.status(400).json({ message: 'Name, phone and password are required' });
     if (password.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters' });
 
@@ -18,9 +14,9 @@ const register = async (req, res) => {
     if (exists) return res.status(400).json({ message: 'Phone already registered' });
 
     const allowedRoles = ['worker', 'company'];
-    const user = await User.create({ name, phone, password, role: allowedRoles.includes(role) ? role : 'customer' });
+    const user = await User.create({ name, phone, email: email || undefined, password, role: allowedRoles.includes(role) ? role : 'customer' });
     res.status(201).json({
-      _id: user._id, name: user.name, phone: user.phone,
+      _id: user._id, name: user.name, phone: user.phone, email: user.email,
       role: user.role, isSuperAdmin: user.isSuperAdmin,
       token: generateToken(user._id),
     });
@@ -42,58 +38,12 @@ const login = async (req, res) => {
     if (!match) return res.status(401).json({ message: 'Incorrect password' });
 
     res.json({
-      _id: user._id, name: user.name, phone: user.phone,
+      _id: user._id, name: user.name, phone: user.phone, email: user.email,
       role: user.role, isSuperAdmin: user.isSuperAdmin,
       token: generateToken(user._id),
     });
   } catch (err) {
     res.status(500).json({ message: 'Login failed', error: err.message });
-  }
-};
-
-// Step 1: send OTP to phone
-const sendResetOTP = async (req, res) => {
-  try {
-    const { phone } = req.body;
-    if (!phone) return res.status(400).json({ message: 'Phone is required' });
-
-    const user = await User.findOne({ phone });
-    if (!user) return res.status(404).json({ message: 'No account found with this phone number' });
-
-    const code = Math.floor(100000 + Math.random() * 900000).toString(); // 6-digit
-    const expiresAt = Date.now() + 10 * 60 * 1000; // 10 minutes
-    otpStore.set(phone, { code, expiresAt });
-
-    await sendSMS(phone, `AkaziConnect: Your password reset code is ${code}. Valid for 10 minutes.`);
-
-    res.json({ message: 'OTP sent to your phone' });
-  } catch (err) {
-    res.status(500).json({ message: 'Failed to send OTP' });
-  }
-};
-
-// Step 2: verify OTP + set new password
-const resetPassword = async (req, res) => {
-  try {
-    const { phone, code, newPassword } = req.body;
-    if (!phone || !code || !newPassword) return res.status(400).json({ message: 'Phone, code and new password are required' });
-    if (newPassword.length < 6) return res.status(400).json({ message: 'Password must be at least 6 characters' });
-
-    const stored = otpStore.get(phone);
-    if (!stored) return res.status(400).json({ message: 'No OTP requested for this number' });
-    if (Date.now() > stored.expiresAt) { otpStore.delete(phone); return res.status(400).json({ message: 'OTP has expired. Request a new one.' }); }
-    if (stored.code !== code) return res.status(400).json({ message: 'Incorrect OTP code' });
-
-    const user = await User.findOne({ phone });
-    if (!user) return res.status(404).json({ message: 'User not found' });
-
-    const hashed = await bcrypt.hash(newPassword, 10);
-    await User.findByIdAndUpdate(user._id, { password: hashed });
-    otpStore.delete(phone);
-
-    res.json({ message: 'Password reset successfully' });
-  } catch (err) {
-    res.status(500).json({ message: 'Failed to reset password' });
   }
 };
 
@@ -105,7 +55,7 @@ const changePassword = async (req, res) => {
 
     const user = await User.findById(req.user._id);
     if (!user) return res.status(404).json({ message: 'User not found' });
-    if (!user.password) return res.status(400).json({ message: 'Please reset your password first' });
+    if (!user.password) return res.status(400).json({ message: 'No password set. Contact admin.' });
 
     const match = await user.matchPassword(currentPassword);
     if (!match) return res.status(401).json({ message: 'Current password is incorrect' });
@@ -114,14 +64,26 @@ const changePassword = async (req, res) => {
     await User.findByIdAndUpdate(req.user._id, { password: hashed });
     res.json({ message: 'Password changed successfully' });
   } catch (err) {
-    console.error('changePassword error:', err.message);
     res.status(500).json({ message: err.message || 'Failed to change password' });
+  }
+};
+
+const updateEmail = async (req, res) => {
+  try {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ message: 'Email is required' });
+    const existing = await User.findOne({ email });
+    if (existing && existing._id.toString() !== req.user._id.toString()) return res.status(400).json({ message: 'Email already in use' });
+    await User.findByIdAndUpdate(req.user._id, { email });
+    res.json({ message: 'Email updated' });
+  } catch (err) {
+    res.status(500).json({ message: 'Failed to update email' });
   }
 };
 
 const getMe = async (req, res) => {
   try {
-    const user = await User.findById(req.user._id).select('_id name phone role isSuperAdmin isActive');
+    const user = await User.findById(req.user._id).select('_id name phone email role isSuperAdmin isActive');
     if (!user) return res.status(404).json({ message: 'User not found' });
     res.json(user);
   } catch (err) {
@@ -141,4 +103,4 @@ const getUserById = async (req, res) => {
   }
 };
 
-module.exports = { register, login, sendResetOTP, resetPassword, changePassword, getMe, getUserById };
+module.exports = { register, login, changePassword, updateEmail, getMe, getUserById };
