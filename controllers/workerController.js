@@ -11,8 +11,7 @@ const registerWorker = async (req, res) => {
     const existing = await Worker.findOne({ user: req.user._id });
     if (existing) return res.status(400).json({ message: 'Worker profile already exists' });
 
-    const photo = req.file ? req.file.path : '';
-    // req.file.path is the Cloudinary URL when using CloudinaryStorage
+    const photo = req.file ? (req.file.path || `/uploads/${req.file.filename}`) : '';
     const worker = await Worker.create({
       user: req.user._id, name, phone, whatsapp, category, location,
       description, yearsOfExperience, photo, isApproved: false, registrationFeePaid: false,
@@ -166,7 +165,7 @@ const updateMyProfile = async (req, res) => {
     if (location) worker.location = location;
     if (description !== undefined) worker.description = description;
     if (yearsOfExperience !== undefined) worker.yearsOfExperience = yearsOfExperience;
-    if (req.file) worker.photo = req.file.path;
+    if (req.file) worker.photo = req.file.path || `/uploads/${req.file.filename}`;
 
     await worker.save();
     await worker.populate('category', 'name icon slug');

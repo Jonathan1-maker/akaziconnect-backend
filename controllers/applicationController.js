@@ -13,7 +13,7 @@ const applyForJob = async (req, res) => {
     const existing = await JobApplication.findOne({ job: req.params.jobId, applicant: req.user._id });
     if (existing) return res.status(400).json({ message: 'You have already applied for this job' });
 
-    const documents = req.files ? req.files.map((f) => f.path) : [];
+    const documents = req.files ? req.files.map((f) => f.path || `/uploads/${f.filename}`) : [];
 
     const application = await JobApplication.create({
       job: req.params.jobId,
