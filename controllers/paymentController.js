@@ -2,6 +2,7 @@ const Payment = require('../models/Payment');
 const Worker = require('../models/Worker');
 const crypto = require('crypto');
 const { notify } = require('../config/notify');
+const { cashIn, getTransaction } = require('../config/paypack');
 
 const TOTAL_FEE = 500;
 const ADMIN_SHARE = 400;
@@ -25,7 +26,7 @@ const checkAccess = async (req, res) => {
 
 // initiate payment — works for guests (phone only) and logged-in users
 const initiatePayment = async (req, res) => {
-  const { workerId, guestPhone } = req.body;
+  const { workerId, guestPhone, momoPhone } = req.body;
   if (!workerId) return res.status(400).json({ message: 'Worker ID required' });
   if (!req.user && !guestPhone) return res.status(400).json({ message: 'Phone number required' });
 
@@ -62,6 +63,23 @@ const initiatePayment = async (req, res) => {
   else paymentData.guestPhone = guestPhone;
 
   const payment = await Payment.create(paymentData);
+
+  // Try PayPack MoMo push payment
+  const payPhone = momoPhone || guestPhone || null;
+  let momoResult = null;
+  let momoError = null;
+
+  if (payPhone && process.env.PAYPACK_CLIENT_ID) {
+    try {
+      momoResult = await cashIn({ amount: TOTAL_FEE, phone: payPhone, ref: reference });
+      // save paypack transaction ref
+      payment.paypackRef = momoResult?.ref || momoResult?.transaction_id || null;
+      await payment.save();
+    } catch (err) {
+      momoError = err.response?.data?.message || err.message;
+    }
+  }
+
   const ussdCode = `*182*1*1*${ADMIN_MOMO}*${TOTAL_FEE}#`;
 
   res.status(201).json({
@@ -74,6 +92,11 @@ const initiatePayment = async (req, res) => {
     ussdCode,
     adminMomo: ADMIN_MOMO,
     status: 'pending',
+    momoRequested: !!momoResult,
+    momoError,
+    message: momoResult
+      ? `A payment request of ${TOTAL_FEE} RWF has been sent to ${payPhone}. Check your phone and approve.`
+      : `Please pay ${TOTAL_FEE} RWF via MoMo using the USSD code below.`,
   });
 };
 

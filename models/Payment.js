@@ -12,6 +12,7 @@ const paymentSchema = new mongoose.Schema({
   workerPaid: { type: Boolean, default: false },
   method: { type: String, enum: ['momo', 'airtel', 'simulated'], default: 'momo' },
   reference: { type: String, unique: true },
+  paypackRef: { type: String, default: '' },
 }, { timestamps: true });
 
 paymentSchema.index({ worker: 1 });
