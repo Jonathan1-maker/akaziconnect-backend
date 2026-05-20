@@ -100,6 +100,58 @@ const initiatePayment = async (req, res) => {
   });
 };
 
+// webhook — Paypack calls this automatically when user approves payment on phone
+const webhookPayment = async (req, res) => {
+  try {
+    const event = req.body;
+    // Paypack sends: { event: 'transaction:cashin', data: { ref, status, amount, number } }
+    if (event?.event !== 'transaction:cashin') return res.sendStatus(200);
+
+    const { ref, status } = event.data || {};
+    if (status !== 'successful') return res.sendStatus(200);
+
+    // find payment by paypackRef
+    const payment = await Payment.findOne({ paypackRef: ref, status: 'pending' });
+    if (!payment) return res.sendStatus(200);
+
+    payment.status = 'completed';
+    payment.workerPaid = true;
+    await payment.save();
+
+    // emit socket event so frontend updates instantly
+    const { getIO } = require('../config/socket');
+    const io = getIO();
+    if (io) io.emit(`payment_confirmed_${payment._id}`, { hasAccess: true });
+
+    // notify worker
+    const worker = await Worker.findById(payment.worker).select('user name');
+    if (worker?.user) {
+      await notify(worker.user, 'contact_unlocked', '🔓 Contact Unlocked', `Someone unlocked your contact. You earned ${payment.workerShare} RWF.`, { paymentId: payment._id });
+    }
+
+    res.sendStatus(200);
+  } catch (err) {
+    console.error('Webhook error:', err.message);
+    res.sendStatus(200); // always 200 to Paypack
+  }
+};
+
+// poll status — frontend calls this every 3s to check if webhook confirmed
+const getPaymentStatus = async (req, res) => {
+  const { paymentId } = req.params;
+  const { guestPhone } = req.query;
+
+  const query = { _id: paymentId };
+  if (req.user) query.payer = req.user._id;
+  else if (guestPhone) query.guestPhone = guestPhone;
+  else return res.status(400).json({ message: 'Phone required' });
+
+  const payment = await Payment.findOne(query).select('status workerPaid');
+  if (!payment) return res.status(404).json({ message: 'Not found' });
+
+  res.json({ confirmed: payment.status === 'completed' && payment.workerPaid });
+};
+
 // confirm payment — guest uses reference, logged-in uses paymentId
 const confirmPayment = async (req, res) => {
   const { paymentId } = req.params;
@@ -225,4 +277,4 @@ const confirmRegistrationFee = async (req, res) => {
   res.json({ message: 'Payment submitted. Your profile will be reviewed and activated shortly.' });
 };
 
-module.exports = { checkAccess, initiatePayment, confirmPayment, approveWorkerPayout, getWorkerEarnings, getAllPayments, initiateRegistrationFee, confirmRegistrationFee };
+module.exports = { checkAccess, initiatePayment, confirmPayment, webhookPayment, getPaymentStatus, approveWorkerPayout, getWorkerEarnings, getAllPayments, initiateRegistrationFee, confirmRegistrationFee };
