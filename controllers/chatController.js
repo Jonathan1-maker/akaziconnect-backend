@@ -27,47 +27,37 @@ const getConversation = async (req, res) => {
 
 const getConversationList = async (req, res) => {
   try {
-    const me = req.user._id;
+    const me = req.user._id.toString();
 
     const messages = await Message.find({
-      $or: [{ sender: me }, { receiver: me }],
+      $or: [{ sender: req.user._id }, { receiver: req.user._id }],
     }).sort({ createdAt: -1 });
 
     const seen = new Set();
     const latest = [];
 
     for (const msg of messages) {
-      const otherId = msg.sender.toString() === me.toString()
+      const otherId = msg.sender.toString() === me
         ? msg.receiver.toString()
         : msg.sender.toString();
       if (!seen.has(otherId)) {
         seen.add(otherId);
-        latest.push(msg);
+        latest.push({ msg, otherId });
       }
     }
 
-    const populated = await Message.populate(latest, [
-      { path: 'sender', select: 'name' },
-      { path: 'receiver', select: 'name' },
-    ]);
-
     const unreadCounts = await Message.aggregate([
-      { $match: { receiver: me, read: false } },
+      { $match: { receiver: req.user._id, read: false } },
       { $group: { _id: '$sender', count: { $sum: 1 } } },
     ]);
 
     const unreadMap = {};
     unreadCounts.forEach((u) => { unreadMap[u._id.toString()] = u.count; });
 
-    // build result with worker names where applicable
-    const result = await Promise.all(populated.map(async (msg) => {
-      const isMe = msg.sender._id.toString() === me.toString();
-      const otherId = isMe ? msg.receiver._id.toString() : msg.sender._id.toString();
-      const otherUserName = isMe ? msg.receiver.name : msg.sender.name;
-
-      // check if the other person is a worker — use worker name if so
+    const result = await Promise.all(latest.map(async ({ msg, otherId }) => {
+      const otherUser = await require('../models/User').findById(otherId).select('name');
       const workerProfile = await Worker.findOne({ user: otherId }).select('name');
-      const displayName = workerProfile?.name || otherUserName;
+      const displayName = workerProfile?.name || otherUser?.name || 'Unknown';
 
       return {
         userId: otherId,

@@ -4,7 +4,10 @@ const crypto = require('crypto');
 const { notify } = require('../config/notify');
 
 const BOOKING_FEE = 1000;
-const ADMIN_MOMO = '0795222883';
+const ADMIN_MTN = '0795222883';
+const ADMIN_AIRTEL = '0738979382';
+const MTN_USSD = `*182*1*1*${ADMIN_MTN}*${BOOKING_FEE}#`;
+const AIRTEL_USSD = `*182*1*2*${ADMIN_AIRTEL}*${BOOKING_FEE}#`;
 
 const initiateBookingFee = async (req, res) => {
   try {
@@ -13,8 +16,7 @@ const initiateBookingFee = async (req, res) => {
     const worker = await Worker.findById(workerId);
     if (!worker || !worker.isApproved) return res.status(404).json({ message: 'Worker not found' });
     const reference = `BKF-${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
-    const ussdCode = `*182*1*1*${ADMIN_MOMO}*${BOOKING_FEE}#`;
-    res.json({ reference, amount: BOOKING_FEE, ussdCode, adminMomo: ADMIN_MOMO, currency: 'RWF' });
+    res.json({ reference, amount: BOOKING_FEE, mtnUssd: MTN_USSD, airtelUssd: AIRTEL_USSD, adminMtn: ADMIN_MTN, adminAirtel: ADMIN_AIRTEL, currency: 'RWF' });
   } catch (err) {
     res.status(500).json({ message: 'Failed to initiate booking fee' });
   }

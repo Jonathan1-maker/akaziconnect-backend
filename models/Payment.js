@@ -8,7 +8,7 @@ const paymentSchema = new mongoose.Schema({
   adminShare: { type: Number, default: 400 },
   workerShare: { type: Number, default: 100 },
   currency: { type: String, default: 'RWF' },
-  status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
+  status: { type: String, enum: ['pending', 'awaiting_admin', 'completed', 'failed'], default: 'pending' },
   workerPaid: { type: Boolean, default: false },
   method: { type: String, enum: ['momo', 'airtel', 'simulated'], default: 'momo' },
   reference: { type: String, unique: true },

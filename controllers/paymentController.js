@@ -2,15 +2,18 @@ const Payment = require('../models/Payment');
 const Worker = require('../models/Worker');
 const crypto = require('crypto');
 const { notify } = require('../config/notify');
-const { cashIn, getTransaction } = require('../config/paypack');
 
 const TOTAL_FEE = 500;
 const ADMIN_SHARE = 400;
 const WORKER_SHARE = 100;
-const ADMIN_MOMO = '0795222883';
+const ADMIN_MTN = '0795222883';
+const ADMIN_AIRTEL = '0738979382';
 const REGISTRATION_FEE = 2000;
 
-// check access by guest phone or logged-in user
+const MTN_USSD = `*182*1*1*${ADMIN_MTN}*${TOTAL_FEE}#`;
+const AIRTEL_USSD = `*182*1*2*${ADMIN_AIRTEL}*${TOTAL_FEE}#`;
+
+// check access
 const checkAccess = async (req, res) => {
   const { workerId } = req.params;
   const { guestPhone } = req.query;
@@ -24,9 +27,9 @@ const checkAccess = async (req, res) => {
   res.json({ hasAccess: !!payment });
 };
 
-// initiate payment — works for guests (phone only) and logged-in users
+// initiate payment — creates a pending payment and returns USSD codes
 const initiatePayment = async (req, res) => {
-  const { workerId, guestPhone, momoPhone } = req.body;
+  const { workerId, guestPhone, provider } = req.body;
   if (!workerId) return res.status(400).json({ message: 'Worker ID required' });
   if (!req.user && !guestPhone) return res.status(400).json({ message: 'Phone number required' });
 
@@ -34,10 +37,9 @@ const initiatePayment = async (req, res) => {
   if (!worker || !worker.isApproved) return res.status(404).json({ message: 'Worker not found' });
 
   // check if already paid
-  const existingQuery = { worker: workerId, status: 'completed' };
+  const existingQuery = { worker: workerId, status: 'completed', workerPaid: true };
   if (req.user) existingQuery.payer = req.user._id;
   else existingQuery.guestPhone = guestPhone;
-
   const existing = await Payment.findOne(existingQuery);
   if (existing) return res.status(400).json({ message: 'Already unlocked', hasAccess: true });
 
@@ -54,7 +56,7 @@ const initiatePayment = async (req, res) => {
     amount: TOTAL_FEE,
     adminShare: ADMIN_SHARE,
     workerShare: WORKER_SHARE,
-    method: 'momo',
+    method: provider === 'airtel' ? 'airtel' : 'momo',
     reference,
     status: 'pending',
   };
@@ -64,79 +66,52 @@ const initiatePayment = async (req, res) => {
 
   const payment = await Payment.create(paymentData);
 
-  // Try PayPack MoMo push payment
-  const payPhone = momoPhone || guestPhone || null;
-  let momoResult = null;
-  let momoError = null;
-
-  if (payPhone && process.env.PAYPACK_CLIENT_ID) {
-    try {
-      momoResult = await cashIn({ amount: TOTAL_FEE, phone: payPhone, ref: reference });
-      // save paypack transaction ref
-      payment.paypackRef = momoResult?.ref || momoResult?.transaction_id || null;
-      await payment.save();
-    } catch (err) {
-      momoError = err.response?.data?.message || err.message;
-    }
-  }
-
-  const ussdCode = `*182*1*1*${ADMIN_MOMO}*${TOTAL_FEE}#`;
-
   res.status(201).json({
     paymentId: payment._id,
     reference,
     amount: TOTAL_FEE,
-    adminShare: ADMIN_SHARE,
-    workerShare: WORKER_SHARE,
     currency: 'RWF',
-    ussdCode,
-    adminMomo: ADMIN_MOMO,
+    mtnUssd: MTN_USSD,
+    airtelUssd: AIRTEL_USSD,
+    adminMtn: ADMIN_MTN,
+    adminAirtel: ADMIN_AIRTEL,
     status: 'pending',
-    momoRequested: !!momoResult,
-    momoError,
-    message: momoResult
-      ? `A payment request of ${TOTAL_FEE} RWF has been sent to ${payPhone}. Check your phone and approve.`
-      : `Please pay ${TOTAL_FEE} RWF via MoMo using the USSD code below.`,
   });
 };
 
-// webhook — Paypack calls this automatically when user approves payment on phone
-const webhookPayment = async (req, res) => {
-  try {
-    const event = req.body;
-    // Paypack sends: { event: 'transaction:cashin', data: { ref, status, amount, number } }
-    if (event?.event !== 'transaction:cashin') return res.sendStatus(200);
+// user confirms they paid — sets status to awaiting_admin
+const confirmPayment = async (req, res) => {
+  const { paymentId } = req.params;
+  const { guestPhone, provider } = req.body;
 
-    const { ref, status } = event.data || {};
-    if (status !== 'successful') return res.sendStatus(200);
+  const query = { _id: paymentId };
+  if (req.user) query.payer = req.user._id;
+  else if (guestPhone) query.guestPhone = guestPhone;
+  else return res.status(400).json({ message: 'Phone number required' });
 
-    // find payment by paypackRef
-    const payment = await Payment.findOne({ paypackRef: ref, status: 'pending' });
-    if (!payment) return res.sendStatus(200);
+  const payment = await Payment.findOne(query);
+  if (!payment) return res.status(404).json({ message: 'Payment not found' });
+  if (payment.status === 'completed') return res.json({ message: 'Already confirmed', hasAccess: true });
 
-    payment.status = 'completed';
-    payment.workerPaid = true;
-    await payment.save();
+  payment.status = 'awaiting_admin';
+  if (provider) payment.method = provider === 'airtel' ? 'airtel' : 'momo';
+  await payment.save();
 
-    // emit socket event so frontend updates instantly
-    const { getIO } = require('../config/socket');
-    const io = getIO();
-    if (io) io.emit(`payment_confirmed_${payment._id}`, { hasAccess: true });
+  // notify admins
+  const User = require('../models/User');
+  const admins = await User.find({ role: 'admin' }).select('_id');
+  const worker = await Worker.findById(payment.worker).select('name');
+  await Promise.all(admins.map((a) => notify(
+    a._id, 'payment_submitted',
+    '💳 Payment Submitted',
+    `Someone paid to unlock ${worker?.name || 'a worker'} contact. Ref: ${payment.reference}. Please verify and approve.`,
+    { paymentId: payment._id }
+  )));
 
-    // notify worker
-    const worker = await Worker.findById(payment.worker).select('user name');
-    if (worker?.user) {
-      await notify(worker.user, 'contact_unlocked', '🔓 Contact Unlocked', `Someone unlocked your contact. You earned ${payment.workerShare} RWF.`, { paymentId: payment._id });
-    }
-
-    res.sendStatus(200);
-  } catch (err) {
-    console.error('Webhook error:', err.message);
-    res.sendStatus(200); // always 200 to Paypack
-  }
+  res.json({ message: 'Payment submitted. Contact will be unlocked after admin approval.' });
 };
 
-// poll status — frontend calls this every 3s to check if webhook confirmed
+// check payment status
 const getPaymentStatus = async (req, res) => {
   const { paymentId } = req.params;
   const { guestPhone } = req.query;
@@ -152,44 +127,50 @@ const getPaymentStatus = async (req, res) => {
   res.json({ confirmed: payment.status === 'completed' && payment.workerPaid });
 };
 
-// confirm payment — guest uses reference, logged-in uses paymentId
-const confirmPayment = async (req, res) => {
-  const { paymentId } = req.params;
-  const { guestPhone } = req.body;
-
-  const query = { _id: paymentId };
-  if (req.user) query.payer = req.user._id;
-  else if (guestPhone) query.guestPhone = guestPhone;
-  else return res.status(400).json({ message: 'Phone number required' });
-
-  const payment = await Payment.findOne(query);
+// admin approves payment — unlocks contact
+const approvePayment = async (req, res) => {
+  const payment = await Payment.findById(req.params.paymentId);
   if (!payment) return res.status(404).json({ message: 'Payment not found' });
-  if (payment.status === 'completed') return res.json({ message: 'Already confirmed', hasAccess: true });
+  if (payment.status === 'completed') return res.status(400).json({ message: 'Already approved' });
 
   payment.status = 'completed';
+  payment.workerPaid = true;
   await payment.save();
 
-  res.json({ message: 'Payment submitted. Contact will be unlocked after admin review.', hasAccess: false });
+  // notify payer via socket
+  const { getIO } = require('../config/socket');
+  const io = getIO();
+  if (io) io.emit(`payment_confirmed_${payment._id}`, { hasAccess: true });
+
+  // notify worker
+  const worker = await Worker.findById(payment.worker).select('user name');
+  if (worker?.user) {
+    await notify(worker.user, 'contact_unlocked', '🔓 Contact Unlocked',
+      `Someone unlocked your contact. You earned ${payment.workerShare} RWF.`,
+      { paymentId: payment._id }
+    );
+  }
+
+  res.json({ message: 'Payment approved. Contact unlocked.' });
 };
 
 const approveWorkerPayout = async (req, res) => {
   const payment = await Payment.findById(req.params.paymentId);
   if (!payment) return res.status(404).json({ message: 'Payment not found' });
-  if (payment.status !== 'completed') return res.status(400).json({ message: 'Payment not completed yet' });
+  if (payment.workerPaid) return res.status(400).json({ message: 'Already paid out' });
 
   payment.workerPaid = true;
   await payment.save();
 
-  // notify worker their payout was approved
-  await notify(
-    payment.worker?.user || (await Worker.findById(payment.worker).select('user'))?.user,
-    'payout_approved',
-    '💰 Payout Approved!',
-    `Admin has approved your payout of ${payment.workerShare} RWF. Check your earnings.`,
-    { paymentId: payment._id }
-  );
+  const worker = await Worker.findById(payment.worker).select('user phone name');
+  if (worker?.user) {
+    await notify(worker.user, 'payout_approved', '💰 Payout Sent!',
+      `${payment.workerShare} RWF has been sent to your phone ${worker.phone}.`,
+      { paymentId: payment._id }
+    );
+  }
 
-  res.json({ message: `Worker payout of ${payment.workerShare} RWF approved`, payment });
+  res.json({ message: 'Payout marked as sent.', payment });
 };
 
 const getWorkerEarnings = async (req, res) => {
@@ -204,7 +185,6 @@ const getWorkerEarnings = async (req, res) => {
   const totalEarnings = payments.filter((p) => p.workerPaid).reduce((s, p) => s + p.workerShare, 0);
   const pendingEarnings = payments.filter((p) => !p.workerPaid).reduce((s, p) => s + p.workerShare, 0);
 
-  // attach display phone (registered or guest)
   const enriched = payments.map((p) => ({
     ...p.toObject(),
     customerPhone: p.payer?.phone || p.guestPhone || 'Unknown',
@@ -227,21 +207,17 @@ const getAllPayments = async (req, res) => {
   }));
 
   const totalRevenue = payments.filter((p) => p.status === 'completed').reduce((s, p) => s + p.adminShare, 0);
-  const pendingPayouts = payments.filter((p) => p.status === 'completed' && !p.workerPaid).length;
+  const pendingApprovals = payments.filter((p) => p.status === 'awaiting_admin').length;
 
-  res.json({ payments: enriched, totalRevenue, pendingPayouts });
+  res.json({ payments: enriched, totalRevenue, pendingApprovals });
 };
 
-// worker initiates 2000 RWF registration fee payment
 const initiateRegistrationFee = async (req, res) => {
   const worker = await Worker.findOne({ user: req.user._id });
   if (!worker) return res.status(404).json({ message: 'Worker profile not found' });
   if (worker.registrationFeePaid) return res.status(400).json({ message: 'Registration fee already paid' });
 
   const reference = `REG-${crypto.randomBytes(6).toString('hex').toUpperCase()}`;
-  const ussdCode = `*182*1*1*${ADMIN_MOMO}*${REGISTRATION_FEE}#`;
-
-  // save reference on worker for admin to verify
   worker.registrationFeeReference = reference;
   await worker.save();
 
@@ -249,32 +225,35 @@ const initiateRegistrationFee = async (req, res) => {
     reference,
     amount: REGISTRATION_FEE,
     currency: 'RWF',
-    ussdCode,
-    adminMomo: ADMIN_MOMO,
+    mtnUssd: `*182*1*1*${ADMIN_MTN}*${REGISTRATION_FEE}#`,
+    airtelUssd: `*182*1*2*${ADMIN_AIRTEL}*${REGISTRATION_FEE}#`,
+    adminMtn: ADMIN_MTN,
+    adminAirtel: ADMIN_AIRTEL,
   });
 };
 
-// worker confirms they have paid — admin will verify and approve
 const confirmRegistrationFee = async (req, res) => {
   const worker = await Worker.findOne({ user: req.user._id });
   if (!worker) return res.status(404).json({ message: 'Worker profile not found' });
   if (worker.registrationFeePaid) return res.status(400).json({ message: 'Already paid' });
 
-  // mark as paid pending admin approval — admin approves worker after verifying MoMo
   worker.registrationFeePaid = true;
   await worker.save();
 
-  // notify admin (super admin user)
   const User = require('../models/User');
   const admins = await User.find({ role: 'admin' }).select('_id');
   await Promise.all(admins.map((a) => notify(
     a._id, 'registration_fee_submitted',
     '💳 Worker Registration Fee Submitted',
-    `${worker.name} submitted a 2000 RWF registration fee. Ref: ${worker.registrationFeeReference}. Please verify and approve.`,
+    `${worker.name} submitted a ${REGISTRATION_FEE} RWF registration fee. Ref: ${worker.registrationFeeReference}. Please verify and approve.`,
     { workerId: worker._id }
   )));
 
   res.json({ message: 'Payment submitted. Your profile will be reviewed and activated shortly.' });
 };
 
-module.exports = { checkAccess, initiatePayment, confirmPayment, webhookPayment, getPaymentStatus, approveWorkerPayout, getWorkerEarnings, getAllPayments, initiateRegistrationFee, confirmRegistrationFee };
+module.exports = {
+  checkAccess, initiatePayment, confirmPayment, getPaymentStatus,
+  approvePayment, approveWorkerPayout, getWorkerEarnings, getAllPayments,
+  initiateRegistrationFee, confirmRegistrationFee,
+};
